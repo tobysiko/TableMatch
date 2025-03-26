@@ -12,7 +12,7 @@ export default function SignUp() {
   useEffect(() => {
     if (!loading && user) {
       // If signUp is successful, redirect to the main app
-      router.replace('/(tabs)/SearchGameSessions');
+      router.replace('/tabs/SearchGameSessions');
     }
   }, [user, loading]);
 

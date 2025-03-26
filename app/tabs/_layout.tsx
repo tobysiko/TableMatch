@@ -6,7 +6,7 @@ export default function TabsLayout() {
   return (
     <Tabs
       screenOptions={({ route }) => ({
-        headerShown: false, // Hides the header containing "(tabs)"
+        headerShown: false, // Hides the "(tabs)" header
         tabBarIcon: ({ color, size }) => {
           let iconName = '';
           if (route.name === 'SearchGameSessions') {
@@ -20,25 +20,29 @@ export default function TabsLayout() {
           }
           return <Ionicons name={iconName} size={size} color={color} />;
         },
-        tabBarActiveTintColor: 'tomato',
+        tabBarActiveTintColor: '#E65100', // Orange
         tabBarInactiveTintColor: 'gray',
       })}
     >
       <Tabs.Screen 
         name="SearchGameSessions" 
-        options={{ headerShown: false, title: 'Search' }} 
+      
+        options={{ 
+          headerShown: false, 
+    headerTitle: 'Search Game Sessions',
+    title: 'Search' }} 
       />
       <Tabs.Screen 
         name="AddGameSession" 
-        options={{ headerShown: false, title: 'Add' }} 
+        options={{ title: 'Add' }} 
       />
       <Tabs.Screen 
         name="ListMyGames" 
-        options={{ headerShown: false, title: 'My Games' }} 
+        options={{ title: 'My Games' }} 
       />
       <Tabs.Screen 
         name="Profile" 
-        options={{ headerShown: false, title: 'Profile' }} 
+        options={{ title: 'Profile' }} 
       />
     </Tabs>
   );

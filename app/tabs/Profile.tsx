@@ -3,6 +3,7 @@ import { View, Text, Button, StyleSheet, Modal, TextInput, FlatList, Alert } fro
 import { useRouter } from 'expo-router';
 import { useAuth } from '@/hooks/useAuth';
 import { getFirestore, doc, onSnapshot, updateDoc, getDocs, collection, query, where, getDoc } from 'firebase/firestore';
+import { db } from '@/lib/firebaseConfig'; // Use shared Firebase instance
 
 export default function Profile() {
   const { user, signOut } = useAuth();
@@ -19,7 +20,6 @@ export default function Profile() {
       return;
     }
 
-    const db = getFirestore();
     const userDocRef = doc(db, 'users', user.uid);
 
     const unsubscribe = onSnapshot(userDocRef, (docSnap) => {
@@ -97,17 +97,19 @@ export default function Profile() {
 
   return (
     <View style={styles.container}>
+      <View style={styles.header}>
+        <Text style={styles.headerTitle}>TableMatch</Text>
+      </View>
       <Text style={styles.title}>Profile</Text>
       {userData ? (
         <>
           <Text style={styles.label}>Email: {userData.email}</Text>
-          <Button title="Manage Friends" onPress={() => setShowFriends(true)} />
+          <Button title="Manage Friends" onPress={() => setShowFriends(true)} color="#E65100" />
         </>
       ) : (
-        <Text>No user information available.</Text>
+        <Text style={styles.infoText}>No user information available.</Text>
       )}
 
-      {/* Modal for managing friends */}
       <Modal visible={showFriends} transparent={false} animationType="slide" onRequestClose={() => setShowFriends(false)}>
         <View style={styles.modalContainer}>
           <Text style={styles.title}>Manage Friends</Text>
@@ -115,7 +117,7 @@ export default function Profile() {
             data={friends}
             keyExtractor={(item) => item.uid}
             renderItem={renderFriendItem}
-            ListEmptyComponent={<Text>No friends found.</Text>}
+            ListEmptyComponent={<Text style={styles.infoText}>No friends found.</Text>}
           />
           <TextInput
             style={styles.input}
@@ -123,14 +125,14 @@ export default function Profile() {
             value={searchTerm}
             onChangeText={setSearchTerm}
           />
-          <Button title="Search" onPress={handleSearch} />
+          <Button title="Search" onPress={handleSearch} color="#E65100" />
           <FlatList
             data={searchResults}
             keyExtractor={(item) => item.uid}
             renderItem={renderSearchResultItem}
-            ListEmptyComponent={<Text>No users found.</Text>}
+            ListEmptyComponent={<Text style={styles.infoText}>No users found.</Text>}
           />
-          <Button title="Close" onPress={() => setShowFriends(false)} />
+          <Button title="Close" onPress={() => setShowFriends(false)} color="#E65100" />
         </View>
       </Modal>
     </View>
@@ -138,11 +140,31 @@ export default function Profile() {
 }
 
 const styles = StyleSheet.create({
-  container: { flex: 1, padding: 20, backgroundColor: '#fff' },
-  modalContainer: { flex: 1, padding: 20, justifyContent: 'center', backgroundColor: '#fff' },
-  title: { fontSize: 24, marginBottom: 20, textAlign: 'center' },
-  label: { fontSize: 18, marginBottom: 10 },
-  input: { height: 40, borderWidth: 1, borderColor: '#ccc', paddingHorizontal: 10, marginBottom: 15, borderRadius: 5 },
+  container: { flex: 1, backgroundColor: '#FFFFFF' },
+  header: {
+    backgroundColor: '#4A148C',
+    paddingVertical: 20,
+    alignItems: 'center',
+  },
+  headerTitle: {
+    fontSize: 24,
+    fontWeight: 'bold',
+    color: '#FFFFFF',
+  },
+  title: { fontSize: 24, marginBottom: 20, textAlign: 'center', color: '#4A148C' },
+  label: { fontSize: 18, marginBottom: 10, color: '#4A148C' },
+  input: {
+    height: 40,
+    borderWidth: 1,
+    borderColor: '#E65100',
+    paddingHorizontal: 10,
+    marginBottom: 15,
+    borderRadius: 5,
+    backgroundColor: '#FFF3E0',
+    color: '#4A148C',
+  },
+  modalContainer: { flex: 1, padding: 20, backgroundColor: '#FFFFFF' },
+  infoText: { color: '#B39DDB', textAlign: 'center', marginTop: 10 },
   userRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 },
   userText: { fontSize: 16 }
 });

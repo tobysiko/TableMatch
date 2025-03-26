@@ -1,7 +1,11 @@
-import React, { useState, useEffect } from 'react';
-import { View, Text, TextInput, Button, StyleSheet, Alert, ScrollView, TouchableOpacity, FlatList } from 'react-native';
+import React, { useState, useEffect, useRef } from 'react';
+import { View, Text, TextInput, Button, StyleSheet, Alert, ScrollView, TouchableOpacity, FlatList, Platform } from 'react-native';
 import { getFirestore, collection, addDoc, serverTimestamp, doc, getDoc } from 'firebase/firestore';
 import { useAuth } from '@/hooks/useAuth';
+import { db } from '@/lib/firebaseConfig'; // Use shared Firebase instance
+import pThrottle from 'p-throttle';
+import DateTimePicker from '@react-native-community/datetimepicker';
+import GameTimePicker from '@/app/GameTimePicker';
 
 type Friend = {
   uid: string;
@@ -30,12 +34,39 @@ async function fetchBGGTitle(bggId: string): Promise<string | null> {
   }
 }
 
+const PROXY_URL = 'http://localhost:3000/proxy?url=';
+const BGG_API_URL = 'https://boardgamegeek.com/xmlapi2';
+const maxRank = 100000; // Arbitrary large number for unranked games
+
+const throttle = pThrottle({
+  limit: 5, // Allow 5 requests
+  interval: 10000, // Per 10 seconds
+});
+
+const fetchGameDetails = throttle(async (id: string) => {
+  const detailResponse = await fetch(`${PROXY_URL}${encodeURIComponent(`${BGG_API_URL}/thing?id=${id}`)}`);
+  const detailData = await detailResponse.text();
+
+  // Check if the game is an expansion or promo
+  const isExpansionOrPromo = detailData.includes('<link type="boardgameexpansion"') || detailData.includes('<link type="boardgamepromo"');
+  if (isExpansionOrPromo) {
+    console.log(`Skipping expansion or promo: ${id}`);
+    return null; // Skip expansions and promos
+  }
+
+  // Extract rank from the detailed response
+  const rankMatch = detailData.match(/<rank[^>]*value="([^"]+)"[^>]*>/);
+  const rank = rankMatch && rankMatch[1] !== 'Not Ranked' ? parseInt(rankMatch[1], 10) : maxRank;
+
+  return { rank, isExpansion: false };
+});
+
 export default function AddGameSession() {
   const { user } = useAuth();
   const [boardgamegeekID, setBoardgamegeekID] = useState('');
   const [title, setTitle] = useState('');
   const [location, setLocation] = useState('');
-  const [gameTime, setGameTime] = useState('');
+  const [gameTime, setGameTime] = useState(new Date());
   const [minPlayers, setMinPlayers] = useState(2); // Default to 2
   const [maxPlayers, setMaxPlayers] = useState(4); // Default to 4
   const [friends, setFriends] = useState<Friend[]>([]);
@@ -43,8 +74,10 @@ export default function AddGameSession() {
   const [filteredFriends, setFilteredFriends] = useState<Friend[]>([]);
   const [players, setPlayers] = useState<PlayerWithRoles[]>([]);
   const [bggSearchTerm, setBggSearchTerm] = useState('');
-  const [bggResults, setBggResults] = useState<{ id: string; name: string; year?: number | null; rank?: number | null }[]>([]);
+  const [bggResults, setBggResults] = useState<{ id: string; name: string; year?: number | null }[]>([]);
   const [isSearching, setIsSearching] = useState(false);
+  const searchRequestIdRef = useRef(0);
+  const [showDatePicker, setShowDatePicker] = useState(false);
 
   useEffect(() => {
     if (!user) return;
@@ -108,82 +141,89 @@ export default function AddGameSession() {
       return;
     }
 
+    // Increment the request ID (each call gets a unique ID)
+    const currentRequestId = ++searchRequestIdRef.current;
+
     setIsSearching(true);
     try {
-      const response = await fetch(`https://boardgamegeek.com/xmlapi2/search?query=${term}&type=boardgame`);
+      const response = await fetch(
+        `${PROXY_URL}${encodeURIComponent(`${BGG_API_URL}/search?query=${term}&type=boardgame`)}`
+      );
       const data = await response.text();
 
-      // Parse the XML response to extract game IDs and names
+      // Check if this response is outdated
+      if (currentRequestId !== searchRequestIdRef.current) {
+        // Outdated response; ignore it.
+        return;
+      }
+
+      // Parse XML response
       const parser = new DOMParser();
       const xmlDoc = parser.parseFromString(data, 'text/xml');
-      const items = xmlDoc.getElementsByTagName('item');
+      const items = Array.from(xmlDoc.getElementsByTagName('item')).slice(0, 10);
 
-      const results: { id: string; name: string }[] = [];
-      for (let i = 0; i < items.length; i++) {
-        const id = items[i].getAttribute('id');
-        const nameElement = items[i].getElementsByTagName('name')[0];
-        const name = nameElement ? nameElement.getAttribute('value') : null;
+      // Build results based on substring matching.
+      const results: {
+        id: string;
+        name: string;
+        year?: number | null;
+        matchIndex: number;
+        titleLength: number;
+      }[] = [];
+
+      const lowerTerm = term.toLowerCase();
+
+      for (const item of items) {
+        const id = item.getAttribute("id");
+        const nameElement = item.getElementsByTagName("name")[0];
+        const yearElement = item.getElementsByTagName("yearpublished")[0];
+
+        const name = nameElement ? nameElement.getAttribute("value") : null;
+        const year = yearElement
+          ? parseInt(yearElement.getAttribute("value") || "", 10)
+          : null;
 
         if (id && name) {
-          results.push({ id, name });
+          const lowerName = name.toLowerCase();
+          // Skip promo cards
+          if (lowerName.includes("promo")) {
+            continue;
+          }
+          const matchIndex = lowerName.indexOf(lowerTerm);
+          if (matchIndex >= 0) {
+            results.push({
+              id,
+              name,
+              year,
+              matchIndex,
+              titleLength: name.length,
+            });
+          }
         }
       }
 
-      // Fetch additional details for each game
-      const detailedResults = await Promise.all(
-        results.map(async (game) => {
-          try {
-            const detailResponse = await fetch(`https://boardgamegeek.com/xmlapi2/thing?id=${game.id}`);
-            const detailData = await detailResponse.text();
-
-            // Debug: Log the raw XML response
-            console.log(`Details for game ID ${game.id}:`, detailData);
-
-            // Extract rank and year
-            const yearMatch = detailData.match(/<yearpublished\s+value="([^"]+)"\s*\/>/);
-            const rankMatch = detailData.match(/<rank\s+type="subtype"\s+id="1"\s+value="([^"]+)"\s*\/>/);
-
-            const year = yearMatch ? parseInt(yearMatch[1], 10) : null;
-            const rank = rankMatch && rankMatch[1] !== 'Not Ranked' ? parseInt(rankMatch[1], 10) : null;
-
-            // Debug: Log the extracted rank and year
-            console.log(`Game: ${game.name}, Rank: ${rank}, Year: ${year}`);
-
-            return { ...game, year, rank };
-          } catch (error) {
-            console.error(`Error fetching details for game ID ${game.id}:`, error);
-            return { ...game, year: null, rank: null };
+      // Sort the results:
+      // 1. Lower matchIndex is better.
+      // 2. Higher year (newer) is better.
+      // 3. Shorter title is better.
+      const sortedResults = results
+        .sort((a, b) => {
+          if (a.matchIndex !== b.matchIndex) {
+            return a.matchIndex - b.matchIndex;
           }
+          if ((b.year || 0) !== (a.year || 0)) {
+            return (b.year || 0) - (a.year || 0);
+          }
+          return a.titleLength - b.titleLength;
         })
-      );
+        // Remove extra fields before setting the state.
+        .map((r) => ({ id: r.id, name: r.name, year: r.year }));
 
-      // Sort results based on the new logic
-      const sortedResults = detailedResults.sort((a, b) => {
-        if (a.rank !== null && b.rank !== null) {
-          // Both games have a rank
-          if (a.rank < 10000 && b.rank < 10000) {
-            return a.rank - b.rank; // Sort by rank (ascending)
-          }
-        }
-
-        // One or both games have no rank or rank >= 10000
-        if ((a.rank === null || a.rank >= 10000) && (b.rank === null || b.rank >= 10000)) {
-          if (a.year !== null && b.year !== null) {
-            return b.year - a.year; // Sort by year (descending)
-          }
-        }
-
-        // Games with rank take precedence over games with no rank
-        if (a.rank !== null && b.rank === null) return -1;
-        if (a.rank === null && b.rank !== null) return 1;
-
-        return 0; // Keep original order if no rank or year
-      });
-
+      console.log("Sorted Results:", sortedResults);
       setBggResults(sortedResults);
     } catch (error) {
-      console.error('Error searching BoardGameGeek:', error);
-      Alert.alert('Error', 'Could not search BoardGameGeek.');
+      console.error("Error searching BoardGameGeek:", error);
+      Alert.alert("Error", "Could not search BoardGameGeek.");
     } finally {
       setIsSearching(false);
     }
@@ -192,9 +232,11 @@ export default function AddGameSession() {
   const selectBGGGame = async (game: { id: string; name: string }) => {
     setBoardgamegeekID(game.id);
     setTitle(game.name);
+    setBggSearchTerm(''); // Clear the search field
+    setBggResults([]); // Clear the search results
 
     try {
-      const response = await fetch(`https://boardgamegeek.com/xmlapi2/thing?id=${game.id}`);
+      const response = await fetch(`${PROXY_URL}${encodeURIComponent(`${BGG_API_URL}/thing?id=${game.id}`)}`);
       const data = await response.text();
 
       // Extract min and max players
@@ -231,6 +273,16 @@ export default function AddGameSession() {
     );
   };
 
+  const onChangeGameTime = (event: any, selectedDate?: Date) => {
+    if (selectedDate) {
+      setGameTime(selectedDate);
+    }
+    // For Android, always close the picker after selection
+    if (Platform.OS === 'android') {
+      setShowDatePicker(false);
+    }
+  };
+
   const handleAddGame = async () => {
     if (!user) {
       Alert.alert('Error', 'User not authenticated.');
@@ -246,7 +298,6 @@ export default function AddGameSession() {
     }
 
     try {
-      const db = getFirestore();
       const docRef = await addDoc(collection(db, 'gameSessions'), {
         boardgamegeekID,
         createdAt: serverTimestamp(),
@@ -265,7 +316,7 @@ export default function AddGameSession() {
       Alert.alert('Success', `Game session created with ID: ${docRef.id}`);
       setTitle('');
       setLocation('');
-      setGameTime('');
+      setGameTime(new Date());
       setBoardgamegeekID('');
       setPlayers([]);
       setMinPlayers(2); // Reset to default
@@ -278,6 +329,9 @@ export default function AddGameSession() {
 
   return (
     <ScrollView contentContainerStyle={styles.container}>
+      <View style={styles.header}>
+        <Text style={styles.headerTitle}>TableMatch</Text>
+      </View>
       <Text style={styles.title}>Add a New Game Session</Text>
 
       <Text style={styles.label}>Search BoardGameGeek</Text>
@@ -287,7 +341,7 @@ export default function AddGameSession() {
         value={bggSearchTerm}
         onChangeText={searchBGG}
       />
-      {isSearching && <Text>Searching...</Text>}
+      {isSearching && <Text style={styles.infoText}>Searching...</Text>}
       {bggResults.length > 0 && (
         <FlatList
           data={bggResults}
@@ -297,9 +351,8 @@ export default function AddGameSession() {
               style={styles.bggResultItem}
               onPress={() => selectBGGGame(item)}
             >
-              <Text>{item.name}</Text>
-              {item.year && <Text>Year: {item.year}</Text>}
-              {item.rank && <Text>Rank: {item.rank}</Text>}
+              <Text style={styles.bggResultText}>{item.name}</Text>
+              {item.year && <Text style={styles.bggResultText}>Year: {item.year}</Text>}
             </TouchableOpacity>
           )}
         />
@@ -329,12 +382,12 @@ export default function AddGameSession() {
         onChangeText={setLocation}
       />
 
-      <Text style={styles.label}>Game Time (optional, e.g., 2025-03-30 18:00)</Text>
-      <TextInput
-        style={styles.input}
-        placeholder="Enter game time"
-        value={gameTime}
-        onChangeText={setGameTime}
+      <Text style={styles.label}>Game Time</Text>
+      <GameTimePicker
+        gameTime={gameTime}
+        onChangeGameTime={onChangeGameTime}
+        showDatePicker={showDatePicker}
+        setShowDatePicker={setShowDatePicker}
       />
 
       <Text style={styles.label}>Player Count</Text>
@@ -413,16 +466,34 @@ export default function AddGameSession() {
         </View>
       ))}
 
-      <Button title="Add Game Session" onPress={handleAddGame} />
+      <Button title="Add Game Session" onPress={handleAddGame} color="#E65100" />
     </ScrollView>
   );
 }
 
 const styles = StyleSheet.create({
-  container: { padding: 20, backgroundColor: '#fff', flexGrow: 1 },
-  title: { fontSize: 24, marginBottom: 20, textAlign: 'center' },
-  label: { marginTop: 15, marginBottom: 5, fontWeight: 'bold' },
-  input: { borderColor: '#ccc', borderWidth: 1, padding: 10, borderRadius: 5, marginBottom: 10 },
+  container: { padding: 20, backgroundColor: '#FFFFFF', flexGrow: 1 },
+  header: {
+    backgroundColor: '#4A148C',
+    paddingVertical: 20,
+    alignItems: 'center',
+  },
+  headerTitle: {
+    fontSize: 24,
+    fontWeight: 'bold',
+    color: '#FFFFFF',
+  },
+  title: { fontSize: 24, marginBottom: 20, textAlign: 'center', color: '#4A148C' },
+  label: { marginTop: 15, marginBottom: 5, fontWeight: 'bold', color: '#4A148C' },
+  input: {
+    borderColor: '#E65100',
+    borderWidth: 1,
+    padding: 10,
+    borderRadius: 5,
+    marginBottom: 10,
+    backgroundColor: '#FFF3E0',
+    color: '#4A148C',
+  },
   friendItem: { padding: 10, borderWidth: 1, borderColor: '#ccc', borderRadius: 5, marginBottom: 5 },
   friendText: { fontSize: 16 },
   playerRow: { flexDirection: 'row', alignItems: 'center', marginBottom: 10 },
@@ -438,5 +509,11 @@ const styles = StyleSheet.create({
   row: { flexDirection: 'row', justifyContent: 'space-between', marginBottom: 10 },
   inputContainer: { flex: 1, marginHorizontal: 5 },
   inputLabel: { fontWeight: 'bold', marginBottom: 5 },
-  bggResultItem: { padding: 10, borderBottomWidth: 1, borderBottomColor: '#ccc' },
+  bggResultItem: {
+    padding: 10,
+    borderBottomWidth: 1,
+    borderBottomColor: '#E0E0E0',
+  },
+  bggResultText: { color: '#4A148C' },
+  infoText: { color: '#B39DDB', marginBottom: 10 },
 });

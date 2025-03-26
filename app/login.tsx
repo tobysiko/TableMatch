@@ -11,7 +11,7 @@ export default function Login() {
 
   useEffect(() => {
     if (!loading && user) {
-      router.replace('/(tabs)/SearchGameSessions');
+      router.replace('/tabs/SearchGameSessions');
     }
   }, [user, loading]);
 

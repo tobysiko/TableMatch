@@ -1,9 +1,18 @@
 import React, { useState, useEffect } from 'react';
-import { View, Text, TextInput, Button, StyleSheet, Alert, ScrollView, TouchableOpacity, FlatList, Image } from 'react-native';
+import {
+  View,
+  Text,
+  FlatList,
+  Image,
+  TouchableOpacity,
+  StyleSheet,
+  Alert,
+  ScrollView,
+} from 'react-native';
 import { getFirestore, collection, query, where, onSnapshot } from 'firebase/firestore';
 import { useAuth } from '@/hooks/useAuth';
-import { fetchGameSessions } from '@/lib/gameSessions';
 import { useRouter } from 'expo-router';
+import { fetchGameSessions } from '@/lib/gameSessions';
 
 type Friend = {
   uid: string;
@@ -53,15 +62,16 @@ export default function ListMyGames() {
   const { user } = useAuth();
   const [sessions, setSessions] = useState<GameSession[]>([]);
   const [images, setImages] = useState<{ [key: string]: string | null }>({});
+  const [selectedFilter, setSelectedFilter] = useState<'all' | 'creator' | 'owner' | 'host' | 'player' | 'teacher'>('all');
   const router = useRouter();
 
   useEffect(() => {
-    if (!user) return; // Wait until the user is available
+    if (!user) return;
     const db = getFirestore();
     const sessionsRef = collection(db, "gameSessions");
     const q = query(
       sessionsRef,
-      where("players", "array-contains", user.uid) // Fetch sessions where the user is a participant
+      where("players", "array-contains", user.uid)
     );
     const unsubscribe = onSnapshot(q, (querySnapshot) => {
       const data: GameSession[] = [];
@@ -92,11 +102,14 @@ export default function ListMyGames() {
     return sessions.filter((session) => {
       if (role === 'creator') return session.creator === user.uid;
       if (role === 'owner') return session.owner === user.uid;
-      if (role === 'host') return session.hosts.includes(user.uid);
-      if (role === 'player') return session.players.includes(user.uid);
-      if (role === 'teacher') return session.teachers.includes(user.uid);
+      if (role === 'host') return session.hosts && session.hosts.includes(user.uid);
+      if (role === 'player') return session.players && session.players.includes(user.uid);
+      if (role === 'teacher') return session.teachers && session.teachers.includes(user.uid);
+      return false;
     });
   };
+
+  const filteredSessions = filterSessions(selectedFilter);
 
   const renderItem = ({ item }: { item: GameSession }) => {
     const imageUrl = images[item.id];
@@ -110,8 +123,15 @@ export default function ListMyGames() {
           <View style={styles.itemText}>
             <Text style={styles.itemTitle}>{item.title || `Game ${item.boardgamegeekID}`}</Text>
             {item.location && <Text>Location: {item.location}</Text>}
-            {item.gameTime && <Text>Time: {new Date(item.gameTime).toLocaleString()}</Text>}
-            <Text>BoardGameGeek ID: {item.boardgamegeekID}</Text>
+            {item.gameTime && (
+              <Text>
+                Time:{" "}
+                {typeof item.gameTime === "object" && item.gameTime.seconds
+                  ? new Date(item.gameTime.seconds * 1000).toLocaleString()
+                  : new Date(item.gameTime).toLocaleString()}
+              </Text>
+            )}
+            <Text>BGG ID: {item.boardgamegeekID}</Text>
           </View>
         </View>
       </TouchableOpacity>
@@ -120,101 +140,85 @@ export default function ListMyGames() {
 
   return (
     <View style={styles.container}>
+      <View style={styles.header}>
+        <Text style={styles.headerTitle}>TableMatch</Text>
+      </View>
       <Text style={styles.title}>My Game Sessions</Text>
+      
+      {/* Filter Options */}
+      <View style={styles.filterContainer}>
+        {(['all', 'creator', 'owner', 'host', 'player', 'teacher'] as const).map((role) => (
+          <TouchableOpacity
+            key={role}
+            style={[
+              styles.filterButton,
+              selectedFilter === role && styles.filterButtonSelected,
+            ]}
+            onPress={() => setSelectedFilter(role)}
+          >
+            <Text
+              style={[
+                styles.filterText,
+                selectedFilter === role && styles.filterTextSelected,
+              ]}
+            >
+              {role.charAt(0).toUpperCase() + role.slice(1)}
+            </Text>
+          </TouchableOpacity>
+        ))}
+      </View>
 
-      {/* All Game Sessions */}
-      <Text style={styles.sectionTitle}>All Game Sessions</Text>
+      {/* Single List of Filtered Sessions */}
       <FlatList
-        data={filterSessions('all')}
+        data={filteredSessions}
         keyExtractor={(item) => item.id}
         renderItem={renderItem}
-        ListEmptyComponent={<Text>No game sessions found.</Text>}
-      />
-
-      {/* As Creator */}
-      <Text style={styles.sectionTitle}>As Creator</Text>
-      <FlatList
-        data={filterSessions('creator')}
-        keyExtractor={(item) => item.id}
-        renderItem={renderItem}
-        ListEmptyComponent={<Text>No game sessions found as creator.</Text>}
-      />
-
-      {/* As Owner */}
-      <Text style={styles.sectionTitle}>As Owner</Text>
-      <FlatList
-        data={filterSessions('owner')}
-        keyExtractor={(item) => item.id}
-        renderItem={renderItem}
-        ListEmptyComponent={<Text>No game sessions found as owner.</Text>}
-      />
-
-      {/* As Host */}
-      <Text style={styles.sectionTitle}>As Host</Text>
-      <FlatList
-        data={filterSessions('host')}
-        keyExtractor={(item) => item.id}
-        renderItem={renderItem}
-        ListEmptyComponent={<Text>No game sessions found as host.</Text>}
-      />
-
-      {/* As Player */}
-      <Text style={styles.sectionTitle}>As Player</Text>
-      <FlatList
-        data={filterSessions('player')}
-        keyExtractor={(item) => item.id}
-        renderItem={renderItem}
-        ListEmptyComponent={<Text>No game sessions found as player.</Text>}
-      />
-
-      {/* As Teacher */}
-      <Text style={styles.sectionTitle}>As Teacher</Text>
-      <FlatList
-        data={filterSessions('teacher')}
-        keyExtractor={(item) => item.id}
-        renderItem={renderItem}
-        ListEmptyComponent={<Text>No game sessions found as teacher.</Text>}
+        ListEmptyComponent={<Text style={styles.infoText}>No game sessions found.</Text>}
       />
     </View>
   );
 }
 
 const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    padding: 20,
-    backgroundColor: '#fff',
+  container: { flex: 1, backgroundColor: '#FFFFFF' },
+  header: {
+    backgroundColor: '#4A148C',
+    paddingVertical: 20,
+    alignItems: 'center',
   },
-  title: {
+  headerTitle: {
     fontSize: 24,
-    marginBottom: 20,
-  },
-  sectionTitle: {
-    fontSize: 20,
-    marginTop: 20,
-    marginBottom: 10,
     fontWeight: 'bold',
+    color: '#FFFFFF',
+  },
+  title: { fontSize: 24, marginBottom: 20, textAlign: 'center', color: '#4A148C' },
+  infoText: { color: '#B39DDB', textAlign: 'center', marginTop: 10 },
+  filterContainer: { flexDirection: 'row', marginBottom: 10, flexWrap: 'wrap' },
+  filterButton: {
+    paddingVertical: 5,
+    paddingHorizontal: 10,
+    borderRadius: 5,
+    borderWidth: 1,
+    borderColor: '#007AFF',
+    marginRight: 5,
+    marginBottom: 5,
+  },
+  filterButtonSelected: {
+    backgroundColor: '#007AFF',
+  },
+  filterText: {
+    color: '#007AFF',
+  },
+  filterTextSelected: {
+    color: '#fff',
   },
   item: {
     paddingVertical: 15,
     borderBottomWidth: 1,
     borderBottomColor: '#ccc',
   },
-  itemContent: {
-    flexDirection: 'row',
-  },
-  image: {
-    resizeMode: 'cover',
-    height: 100,
-    width: 100,
-  },
-  itemTitle: {
-    marginBottom: 5,
-    fontWeight: 'bold',
-    fontSize: 18,
-  },
-  itemText: {
-    marginLeft: 10,
-    flex: 1,
-  },
+  itemContent: { flexDirection: 'row' },
+  image: { resizeMode: 'cover', height: 100, width: 100 },
+  itemTitle: { marginBottom: 5, fontWeight: 'bold', fontSize: 18 },
+  itemText: { marginLeft: 10, flex: 1 },
 });

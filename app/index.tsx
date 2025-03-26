@@ -12,7 +12,7 @@ export default function Home() {
       setTimeout(() => {
         if (user) {
           // If user is logged in, navigate to the main app (tabs)
-          router.replace('/(tabs)/SearchGameSessions');
+          router.replace('/tabs/SearchGameSessions');
         } else {
           // Otherwise, navigate to the login screen
           router.replace('/login');
