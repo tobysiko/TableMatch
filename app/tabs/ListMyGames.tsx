@@ -13,6 +13,7 @@ import { getFirestore, collection, query, where, onSnapshot } from 'firebase/fir
 import { useAuth } from '@/hooks/useAuth';
 import { useRouter } from 'expo-router';
 import { fetchGameSessions } from '@/lib/gameSessions';
+import { fetchBGGTitle, fetchBGGImage } from '@/lib/boardGameGeek';
 
 type Friend = {
   uid: string;
@@ -31,32 +32,6 @@ type GameSession = {
   players?: string[];
   teachers?: string[];
 };
-
-// A helper function to fetch the game title from BoardGameGeek using its XML endpoint.
-async function fetchBGGTitle(bggId: string): Promise<string | null> {
-  try {
-    const response = await fetch(`https://boardgamegeek.com/xmlapi2/thing?id=${bggId}`);
-    const data = await response.text();
-    const match = data.match(/<name[^>]*type="primary"[^>]*value="([^"]+)"\s*\/?>/);
-    return match && match[1] ? match[1] : null;
-  } catch (error) {
-    console.error("Error fetching game title from BGG:", error);
-    return null;
-  }
-}
-
-// Helper function to fetch BoardGameGeek images via XML.
-async function fetchBGGImage(bggId: string): Promise<string | null> {
-  try {
-    const response = await fetch(`https://boardgamegeek.com/xmlapi2/thing?id=${bggId}`);
-    const data = await response.text();
-    const match = data.match(/<image>([^<]+)<\/image>/);
-    return match && match[1] ? match[1] : null;
-  } catch (error) {
-    console.error("Error fetching game image from BGG:", error);
-    return null;
-  }
-}
 
 export default function ListMyGames() {
   const { user } = useAuth();
@@ -88,8 +63,12 @@ export default function ListMyGames() {
       const newImages: { [key: string]: string | null } = {};
       for (const session of sessions) {
         if (session.boardgamegeekID) {
-          const imageUrl = await fetchBGGImage(session.boardgamegeekID);
-          newImages[session.id] = imageUrl;
+          try {
+            const imageUrl = await fetchBGGImage(session.boardgamegeekID);
+            newImages[session.id] = imageUrl;
+          } catch (error) {
+            console.error('Error fetching image for session:', session.id, error);
+          }
         }
       }
       setImages(newImages);

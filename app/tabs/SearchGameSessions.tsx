@@ -1,7 +1,8 @@
 import React, { useState, useEffect } from 'react';
-import { View, Text, FlatList, TextInput, StyleSheet, StatusBar, TouchableOpacity, Alert } from 'react-native';
+import { View, Text, FlatList, TextInput, StyleSheet, StatusBar, TouchableOpacity, Alert, Picker } from 'react-native';
 import { getFirestore, collection, onSnapshot, doc, getDoc, updateDoc } from 'firebase/firestore';
 import { useAuth } from '@/hooks/useAuth';
+import { fetchBGGTitle, fetchBGGImage } from '@/lib/boardGameGeek';
 
 type GameSession = {
   id: string;
@@ -12,7 +13,25 @@ type GameSession = {
   boardgamegeekId: string;
   hosts: string[];
   players: string[];
+  maxPlayers: number;
   creator: string;
+  gameOwner?: string;
+  teacher?: string;
+};
+
+const fetchSearchResults = async (gameId: string) => {
+  try {
+    const title = await fetchBGGTitle(gameId);
+    const imageUrl = await fetchBGGImage(gameId);
+
+    console.log('Fetched title:', title);
+    console.log('Fetched image URL:', imageUrl);
+
+    return { title, imageUrl };
+  } catch (error) {
+    console.error('Error fetching search result details:', error);
+    return null;
+  }
 };
 
 export default function SearchGameSessions() {
@@ -22,10 +41,10 @@ export default function SearchGameSessions() {
   const [filteredSessions, setFilteredSessions] = useState<GameSession[]>([]);
   const [friends, setFriends] = useState<string[]>([]);
   const [friendNames, setFriendNames] = useState<{ [key: string]: string }>({});
+  const [filter, setFilter] = useState<'all' | 'openSlots' | 'completed'>('all');
+  const [sortOption, setSortOption] = useState<'time' | 'title'>('time');
 
   useEffect(() => {
-    if (!user) return;
-
     const fetchFriends = async () => {
       const db = getFirestore();
       const userDocRef = doc(db, 'users', user.uid);
@@ -34,6 +53,7 @@ export default function SearchGameSessions() {
       if (userDoc.exists()) {
         const userData = userDoc.data();
         setFriends(userData.friends || []);
+        console.log('Friends:', userData.friends); // Debugging
       }
     };
 
@@ -74,6 +94,7 @@ export default function SearchGameSessions() {
         ...doc.data(),
       }));
       setSessions(sessionsData);
+      console.log('Game Sessions:', sessionsData); // Debugging
     });
 
     return () => unsubscribe();
@@ -82,18 +103,26 @@ export default function SearchGameSessions() {
   useEffect(() => {
     const lowerQuery = query.toLowerCase();
     const filtered = sessions.filter((session) => {
-      // Only show games created by friends and where the user is not a player
-      const isCreatedByFriend = friends.includes(session.creator);
-      const isNotAPlayer = !session.players.includes(user.uid);
+      const isCreatedByFriend = friends.includes(session.creator || '');
+      const isNotAPlayer = !session.players?.includes(user.uid || '');
       const matchesQuery =
-        session.sessionTitle?.toLowerCase().includes(lowerQuery) ||
-        session.gameTitle?.toLowerCase().includes(lowerQuery);
+        (session.sessionTitle?.toLowerCase().includes(lowerQuery) || false) ||
+        (session.gameTitle?.toLowerCase().includes(lowerQuery) || false);
 
-      return isCreatedByFriend && isNotAPlayer && matchesQuery;
+      let passesFilter = true;
+      if (filter === 'openSlots') {
+        passesFilter = (session.players?.length || 0) < (session.maxPlayers || 0);
+      } else if (filter === 'completed') {
+        passesFilter = (session.players?.length || 0) >= (session.maxPlayers || 0);
+      }
+
+      const result = Boolean(isCreatedByFriend && isNotAPlayer && matchesQuery && passesFilter);
+      console.log('Session:', session, 'Included:', result); // Debugging
+      return result;
     });
 
     setFilteredSessions(filtered);
-  }, [query, sessions, friends, user]);
+  }, [query, sessions, friends, user, filter, sortOption]);
 
   const joinGame = async (sessionId: string) => {
     try {
@@ -146,6 +175,23 @@ export default function SearchGameSessions() {
         value={query}
         onChangeText={setQuery}
       />
+      <Picker
+        selectedValue={filter}
+        style={styles.picker}
+        onValueChange={(itemValue) => setFilter(itemValue as 'all' | 'openSlots' | 'completed')}
+      >
+        <Picker.Item label="All Sessions" value="all" />
+        <Picker.Item label="Open Slots" value="openSlots" />
+        <Picker.Item label="Completed Sessions" value="completed" />
+      </Picker>
+      <Picker
+        selectedValue={sortOption}
+        style={styles.picker}
+        onValueChange={(itemValue) => setSortOption(itemValue as 'time' | 'title')}
+      >
+        <Picker.Item label="Sort by Time" value="time" />
+        <Picker.Item label="Sort by Title" value="title" />
+      </Picker>
       <FlatList
         data={filteredSessions}
         keyExtractor={(item) => item.id}
@@ -181,6 +227,10 @@ const styles = StyleSheet.create({
     borderRadius: 5,
     color: '#4A148C', // Purple
     backgroundColor: '#FFF3E0', // Light Orange
+  },
+  picker: {
+    marginHorizontal: 15,
+    marginBottom: 10,
   },
   item: {
     paddingVertical: 15,

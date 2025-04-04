@@ -6,6 +6,7 @@ import { db } from '@/lib/firebaseConfig'; // Use shared Firebase instance
 import pThrottle from 'p-throttle';
 import DateTimePicker from '@react-native-community/datetimepicker';
 import GameTimePicker from '@/app/GameTimePicker';
+import { fetchBGGTitle, fetchBGGImage } from '@/lib/boardGameGeek';
 
 type Friend = {
   uid: string;
@@ -21,17 +22,12 @@ type PlayerWithRoles = {
   isPlayer: boolean;
 };
 
-// A helper function to fetch the game title from BoardGameGeek using its XML endpoint.
-async function fetchBGGTitle(bggId: string): Promise<string | null> {
-  try {
-    const response = await fetch(`https://boardgamegeek.com/xmlapi2/thing?id=${bggId}`);
-    const data = await response.text();
-    const match = data.match(/<name[^>]*type="primary"[^>]*value="([^"]+)"\s*\/?>/);
-    return match && match[1] ? match[1] : null;
-  } catch (error) {
-    console.error("Error fetching game title from BGG:", error);
-    return null;
-  }
+interface UserData {
+  uid: string;
+  name: string;
+  email: string;
+  description?: string;
+  friends?: string[];
 }
 
 const PROXY_URL = 'http://localhost:3000/proxy?url=';
@@ -236,10 +232,21 @@ export default function AddGameSession() {
     setBggResults([]); // Clear the search results
 
     try {
+      const title = await fetchBGGTitle(game.id);
+      const imageUrl = await fetchBGGImage(game.id);
+
+      console.log('Fetched title:', title);
+      console.log('Fetched image URL:', imageUrl);
+
+      setTitle(title);
+
+      // Optionally, store the image URL if needed
+      // setImageUrl(imageUrl);
+
+      // Fetch additional details like min/max players
       const response = await fetch(`${PROXY_URL}${encodeURIComponent(`${BGG_API_URL}/thing?id=${game.id}`)}`);
       const data = await response.text();
 
-      // Extract min and max players
       const minPlayersMatch = data.match(/<minplayers\s+value="([^"]+)"\s*\/>/);
       const maxPlayersMatch = data.match(/<maxplayers\s+value="([^"]+)"\s*\/>/);
       const recommendedMinPlayers = minPlayersMatch ? parseInt(minPlayersMatch[1], 10) : 2;
@@ -248,7 +255,7 @@ export default function AddGameSession() {
       setMinPlayers(recommendedMinPlayers);
       setMaxPlayers(recommendedMaxPlayers);
     } catch (error) {
-      console.error('Error fetching game details from BGG:', error);
+      console.error('Error fetching game details:', error);
       Alert.alert('Error', 'Could not fetch game details from BoardGameGeek.');
     }
   };

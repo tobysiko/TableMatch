@@ -12,6 +12,12 @@ app.get('/proxy', async (req, res) => {
     return res.status(400).send('Missing URL parameter');
   }
 
+  const allowedDomains = ['boardgamegeek.com'];
+  const urlObj = new URL(url);
+  if (!allowedDomains.includes(urlObj.hostname)) {
+    return res.status(400).send('Invalid URL');
+  }
+
   try {
     const response = await fetch(url);
     const data = await response.text();

@@ -10,8 +10,9 @@ import {
   Alert,
   ScrollView,
 } from 'react-native';
-import { getFirestore, doc, getDoc, updateDoc } from 'firebase/firestore';
+import { getFirestore, doc, getDoc, updateDoc, runTransaction } from 'firebase/firestore';
 import { useLocalSearchParams } from 'expo-router';
+import { fetchBGGTitle, fetchBGGImage } from '@/lib/boardGameGeek';
 
 type GameSession = {
   id: string;
@@ -37,6 +38,8 @@ export default function GameSessionDetails() {
   const [loading, setLoading] = useState(true);
   const [bggDetails, setBggDetails] = useState<any>(null);
   const [playerNames, setPlayerNames] = useState<{ [key: string]: string }>({});
+  const [friends, setFriends] = useState<string[]>([]);
+  const [user, setUser] = useState<{ uid: string }>({ uid: '' });
 
   useEffect(() => {
     const fetchSession = async () => {
@@ -64,32 +67,47 @@ export default function GameSessionDetails() {
     const fetchBGGDetails = async () => {
       if (session?.boardgamegeekID) {
         try {
-          const response = await fetch(
-            `https://boardgamegeek.com/xmlapi2/thing?id=${session.boardgamegeekID}`
-          );
+          const title = await fetchBGGTitle(session.boardgamegeekID);
+          const imageUrl = await fetchBGGImage(session.boardgamegeekID);
+
+          console.log('Fetched title:', title);
+          console.log('Fetched image URL:', imageUrl);
+
+          const response = await fetch(`https://boardgamegeek.com/xmlapi2/thing?id=${session.boardgamegeekID}`);
           const data = await response.text();
+          console.log('Raw BGG API response:', data); // Debugging log
+
           const parser = new DOMParser();
-          const xmlDoc = parser.parseFromString(data, "text/xml");
+          const xmlDoc = parser.parseFromString(data, 'text/xml');
 
-          const description = xmlDoc.getElementsByTagName("description")[0]?.textContent;
-          const yearPublished = xmlDoc.getElementsByTagName("yearpublished")[0]?.getAttribute("value");
-          const minPlayers = xmlDoc.getElementsByTagName("minplayers")[0]?.getAttribute("value");
-          const maxPlayers = xmlDoc.getElementsByTagName("maxplayers")[0]?.getAttribute("value");
-          const playingTime = xmlDoc.getElementsByTagName("playingtime")[0]?.getAttribute("value");
-          const weight = xmlDoc.getElementsByTagName("averageweight")[0]?.getAttribute("value");
-          const image = xmlDoc.getElementsByTagName("image")[0]?.textContent;
+          const yearPublished = xmlDoc.getElementsByTagName('yearpublished')[0]?.getAttribute('value');
+          const minPlayers = xmlDoc.getElementsByTagName('minplayers')[0]?.getAttribute('value');
+          const maxPlayers = xmlDoc.getElementsByTagName('maxplayers')[0]?.getAttribute('value');
+          const playingTime = xmlDoc.getElementsByTagName('playingtime')[0]?.getAttribute('value');
+          const weight = xmlDoc.getElementsByTagName('averageweight')[0]?.getAttribute('value');
+          const description = xmlDoc.getElementsByTagName('description')[0]?.textContent;
 
-          setBggDetails({
-            description,
+          console.log('Parsed BGG details:', {
             yearPublished,
             minPlayers,
             maxPlayers,
             playingTime,
             weight,
-            image,
+            description,
+          }); // Debugging log
+
+          setBggDetails({
+            title,
+            image: imageUrl,
+            yearPublished,
+            minPlayers,
+            maxPlayers,
+            playingTime,
+            weight,
+            description,
           });
         } catch (error) {
-          console.error("Error fetching BGG details:", error);
+          console.error('Error fetching BGG details:', error);
         }
       }
     };
@@ -127,14 +145,19 @@ export default function GameSessionDetails() {
   const toggleRole = async (uid: string, role: "hosts" | "teachers" | "players") => {
     if (!session) return;
 
+    const isRemovingPlayerRole = role === "players" && session.players?.includes(uid);
+
     // Check if the player is about to lose their last role
     const isLastRole =
-      session.hosts?.includes(uid) +
-      session.teachers?.includes(uid) +
-      session.players?.includes(uid) === 1;
+      (session.hosts?.includes(uid) ? 1 : 0) +
+      (session.teachers?.includes(uid) ? 1 : 0) +
+      (session.players?.includes(uid) ? 1 : 0) === 1;
 
     if (isLastRole && session[role]?.includes(uid)) {
-      Alert.alert("Error", "A player must have at least one role.");
+      Alert.alert(
+        "Error",
+        "A player must have at least one role. Assign another role before removing this one."
+      );
       return;
     }
 
@@ -145,6 +168,26 @@ export default function GameSessionDetails() {
     try {
       const db = getFirestore();
       const docRef = doc(db, "gameSessions", session.id);
+
+      // If removing the "Player" role, ask if the user wants to remove the player from the session
+      if (isRemovingPlayerRole && !updatedRoles.includes(uid)) {
+        Alert.alert(
+          "Remove Player",
+          "Do you want to remove this player from the session?",
+          [
+            { text: "Cancel", style: "cancel" },
+            {
+              text: "Remove",
+              style: "destructive",
+              onPress: async () => {
+                await removePlayer(uid); // Call the removePlayer function
+              },
+            },
+          ]
+        );
+        return; // Exit early to avoid updating roles
+      }
+
       await updateDoc(docRef, { [role]: updatedRoles });
       setSession((prev) => (prev ? { ...prev, [role]: updatedRoles } : prev));
     } catch (error) {
@@ -152,6 +195,112 @@ export default function GameSessionDetails() {
       Alert.alert("Error", "Could not update roles.");
     }
   };
+
+  const removePlayer = async (uid: string) => {
+    if (!session) {
+      Alert.alert('Error', 'Session not found');
+      return;
+    }
+
+    try {
+      const db = getFirestore();
+      const docRef = doc(db, "gameSessions", session.id);
+
+      // Use a transaction to ensure data consistency
+      await runTransaction(db, async (transaction) => {
+        const docSnap = await transaction.get(docRef);
+        if (!docSnap.exists()) {
+          throw new Error("Game session not found");
+        }
+
+        const data = docSnap.data();
+        const updatedPlayers = (data.players || []).filter(
+          (playerId: string) => playerId !== uid
+        );
+
+        // Also remove from roles
+        const updatedHosts = (data.hosts || []).filter(
+          (hostId: string) => hostId !== uid
+        );
+        const updatedTeachers = (data.teachers || []).filter(
+          (teacherId: string) => teacherId !== uid
+        );
+
+        // Update all roles at once
+        transaction.update(docRef, {
+          players: updatedPlayers,
+          hosts: updatedHosts,
+          teachers: updatedTeachers
+        });
+      });
+
+      // Update local state
+      setSession(prev => {
+        if (!prev) return null;
+        return {
+          ...prev,
+          players: prev.players?.filter(id => id !== uid) || [],
+          hosts: prev.hosts?.filter(id => id !== uid) || [],
+          teachers: prev.teachers?.filter(id => id !== uid) || []
+        };
+      });
+
+      Alert.alert('Success', 'Player removed from all roles');
+    } catch (error: any) {
+      console.error('Error removing player:', error);
+      Alert.alert(
+        'Error',
+        error.message || 'Could not remove player. Please try again.'
+      );
+    }
+  };
+
+  const inviteFriend = async (uid: string) => {
+    if (!session) {
+      console.error("Session is null. Cannot invite friend.");
+      return;
+    }
+
+    try {
+      const db = getFirestore();
+      const docRef = doc(db, "gameSessions", session.id);
+
+      await runTransaction(db, async (transaction) => {
+        const docSnap = await transaction.get(docRef);
+        if (!docSnap.exists()) {
+          throw new Error("Game session does not exist.");
+        }
+
+        const data = docSnap.data();
+        const players = data.players || [];
+
+        if (players.includes(uid)) {
+          throw new Error("This friend is already a player.");
+        }
+
+        transaction.update(docRef, {
+          players: [...players, uid],
+        });
+      });
+
+      console.log("Firestore transaction completed successfully."); // Debugging log
+
+      // Update local state
+      setSession((prev) => {
+        const updatedSession = prev ? { ...prev, players: [...(prev.players || []), uid] } : prev;
+        console.log("Updated session state:", updatedSession); // Debugging log
+        return updatedSession;
+      });
+
+      Alert.alert("Success", "Friend invited.");
+    } catch (error: any) {
+      console.error("Error inviting friend:", error);
+      Alert.alert("Error", error.message || "Could not invite friend. Please try again.");
+    }
+  };
+
+  const isCreatedByFriend = friends.includes(session?.creator || '');
+  const isNotAPlayer = !session?.players?.includes(user.uid || '');
 
   if (loading) {
     return (
@@ -193,11 +342,13 @@ export default function GameSessionDetails() {
       {bggDetails && (
         <>
           <Text style={styles.subtitle}>Game Details</Text>
-          <Text>Year Published: {bggDetails.yearPublished}</Text>
-          <Text>Players: {bggDetails.minPlayers} - {bggDetails.maxPlayers}</Text>
-          <Text>Playing Time: {bggDetails.playingTime} minutes</Text>
-          <Text>Weight: {bggDetails.weight}</Text>
-          <Text>Description: {bggDetails.description}</Text>
+          {bggDetails.yearPublished && <Text>Year Published: {bggDetails.yearPublished}</Text>}
+          {bggDetails.minPlayers && bggDetails.maxPlayers && (
+            <Text>Players: {bggDetails.minPlayers} - {bggDetails.maxPlayers}</Text>
+          )}
+          {bggDetails.playingTime && <Text>Playing Time: {bggDetails.playingTime} minutes</Text>}
+          {bggDetails.weight && <Text>Weight: {bggDetails.weight}</Text>}
+          {bggDetails.description && <Text>Description: {bggDetails.description}</Text>}
         </>
       )}
 
@@ -217,7 +368,14 @@ export default function GameSessionDetails() {
                 ]}
                 onPress={() => toggleRole(item, "hosts")}
               >
-                <Text style={styles.roleButtonText}>Host</Text>
+                <Text
+                  style={[
+                    styles.roleButtonText,
+                    session.hosts?.includes(item) && styles.roleButtonTextActive,
+                  ]}
+                >
+                  Host
+                </Text>
               </TouchableOpacity>
               <TouchableOpacity
                 style={[
@@ -226,7 +384,14 @@ export default function GameSessionDetails() {
                 ]}
                 onPress={() => toggleRole(item, "teachers")}
               >
-                <Text style={styles.roleButtonText}>Teacher</Text>
+                <Text
+                  style={[
+                    styles.roleButtonText,
+                    session.teachers?.includes(item) && styles.roleButtonTextActive,
+                  ]}
+                >
+                  Teacher
+                </Text>
               </TouchableOpacity>
               <TouchableOpacity
                 style={[
@@ -235,9 +400,42 @@ export default function GameSessionDetails() {
                 ]}
                 onPress={() => toggleRole(item, "players")}
               >
-                <Text style={styles.roleButtonText}>Player</Text>
+                <Text
+                  style={[
+                    styles.roleButtonText,
+                    session.players?.includes(item) && styles.roleButtonTextActive,
+                  ]}
+                >
+                  Player
+                </Text>
               </TouchableOpacity>
+              {session.creator === user.uid && (
+                <TouchableOpacity
+                  style={styles.removeButton}
+                  onPress={() => removePlayer(item)}
+                >
+                  <Text style={styles.removeButtonText}>Remove</Text>
+                </TouchableOpacity>
+              )}
             </View>
+          </View>
+        )}
+      />
+
+      {/* Invite Friends */}
+      <Text style={styles.subtitle}>Invite Friends</Text>
+      <FlatList
+        data={friends.filter((friendUid) => !session.players?.includes(friendUid))}
+        keyExtractor={(item) => item}
+        renderItem={({ item }) => (
+          <View style={styles.friendItem}>
+            <Text>{playerNames[item] || "Unknown"}</Text>
+            <TouchableOpacity
+              style={styles.inviteButton}
+              onPress={() => inviteFriend(item)}
+            >
+              <Text style={styles.inviteButtonText}>Invite</Text>
+            </TouchableOpacity>
           </View>
         )}
       />
@@ -265,11 +463,42 @@ const styles = StyleSheet.create({
   roleButton: {
     padding: 5,
     borderWidth: 1,
-    borderColor: "#007AFF",
+    borderColor: "#007AFF", // Blue border for deselected state
     borderRadius: 5,
     marginRight: 5,
+    backgroundColor: "#FFFFFF", // White background for deselected state
   },
-  roleButtonActive: { backgroundColor: "#007AFF" },
-  roleButtonText: { color: "#007AFF" },
+  roleButtonActive: {
+    backgroundColor: "#007AFF", // Blue background for selected state
+    borderColor: "#005BB5", // Slightly darker blue border for selected state
+  },
+  roleButtonText: {
+    color: "#007AFF", // Blue text for deselected state
+  },
+  roleButtonTextActive: {
+    color: "#FFFFFF", // White text for selected state
+  },
   coverImage: { width: "100%", height: 200, resizeMode: "cover", marginBottom: 10 },
+  removeButton: {
+    padding: 5,
+    borderWidth: 1,
+    borderColor: "red",
+    borderRadius: 5,
+    marginLeft: 5,
+  },
+  removeButtonText: { color: "red" },
+  inviteButton: {
+    padding: 5,
+    borderWidth: 1,
+    borderColor: "#4CAF50",
+    borderRadius: 5,
+  },
+  inviteButtonText: {
+    color: "#4CAF50",
+  },
+  friendItem: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    marginBottom: 10,
+  },
 });
