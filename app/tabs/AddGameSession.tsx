@@ -295,24 +295,21 @@ export default function AddGameSession() {
       Alert.alert('Error', 'User not authenticated.');
       return;
     }
-    if (!boardgamegeekID.trim()) {
-      Alert.alert('Validation Error', 'A BoardGameGeek ID is required.');
-      return;
-    }
-    if (minPlayers > maxPlayers) {
-      Alert.alert('Validation Error', 'Min players cannot be greater than max players.');
-      return;
-    }
+
+    // Use default values for missing information
+    const sessionTitle = title.trim() || 'Unspecified game session';
+    const sessionLocation = location.trim() || null;
+    const sessionGameTime = gameTime || null;
 
     try {
       const docRef = await addDoc(collection(db, 'gameSessions'), {
-        boardgamegeekID,
+        boardgamegeekID: boardgamegeekID.trim() || null, // Allow null if no game is selected
         createdAt: serverTimestamp(),
         creator: user.uid,
-        gameTime: gameTime ? new Date(gameTime) : null,
-        location: location || null,
+        gameTime: sessionGameTime,
+        location: sessionLocation,
         owner: user.uid,
-        title,
+        title: sessionTitle,
         minPlayers,
         maxPlayers,
         hosts: players.filter((player) => player.isHost).map((player) => player.uid),

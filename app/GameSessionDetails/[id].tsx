@@ -3,16 +3,20 @@ import {
   View,
   Text,
   StyleSheet,
-  ActivityIndicator,
-  FlatList,
-  TouchableOpacity,
-  Image,
   Alert,
   ScrollView,
+  Image,
+  TouchableOpacity,
+  TextInput,
+  FlatList,
 } from 'react-native';
-import { getFirestore, doc, getDoc, updateDoc, runTransaction } from 'firebase/firestore';
+import { getFirestore, doc, getDoc, updateDoc, collection, getDocs } from 'firebase/firestore';
 import { useLocalSearchParams } from 'expo-router';
-import { fetchBGGTitle, fetchBGGImage } from '@/lib/boardGameGeek';
+import { useAuth } from '@/hooks/useAuth';
+import BGGSearchInput from '@/app/BGGSearchInput';
+import GameTimePicker from '@/app/GameTimePicker';
+import { fetchBGGGameDetails } from '@/lib/boardGameGeek';
+import { useRouter } from 'expo-router';
 
 type GameSession = {
   id: string;
@@ -20,6 +24,8 @@ type GameSession = {
   location?: string;
   gameTime?: any; // Firestore Timestamp or raw object
   boardgamegeekID?: string;
+  description?: string;
+  image?: string;
   creator?: string;
   owner?: string;
   hosts?: string[];
@@ -27,34 +33,115 @@ type GameSession = {
   teachers?: string[];
 };
 
-type Player = {
+type User = {
   uid: string;
   name: string;
 };
 
+type BGGGameDetails = {
+  image: string;
+  minPlayers: number;
+  maxPlayers: number;
+  description: string;
+};
+
 export default function GameSessionDetails() {
-  const { id } = useLocalSearchParams<{ id: string }>();
+  const { user } = useAuth();
+  const router = useRouter();
   const [session, setSession] = useState<GameSession | null>(null);
   const [loading, setLoading] = useState(true);
-  const [bggDetails, setBggDetails] = useState<any>(null);
-  const [playerNames, setPlayerNames] = useState<{ [key: string]: string }>({});
-  const [friends, setFriends] = useState<string[]>([]);
-  const [user, setUser] = useState<{ uid: string }>({ uid: '' });
+  const [isEditing, setIsEditing] = useState(false);
+  const [updatedDetails, setUpdatedDetails] = useState({
+    title: '',
+    location: '',
+    gameTime: new Date(),
+    boardgamegeekID: '',
+    description: '',
+    image: '',
+  });
+  const [bggDetails, setBggDetails] = useState<BGGGameDetails | null>(null);
+  const [showFullDescription, setShowFullDescription] = useState(false);
+  const [showDatePicker, setShowDatePicker] = useState(false);
+  const [participants, setParticipants] = useState<User[]>([]);
+  const [creatorName, setCreatorName] = useState<string>('Unknown');
+  const [ownerName, setOwnerName] = useState<string>('Unknown');
+  const [newParticipant, setNewParticipant] = useState('');
+  const [friendList, setFriendList] = useState<User[]>([]); // Full friends list
+  const [filteredFriends, setFilteredFriends] = useState<User[]>([]); // Filtered suggestions
+
+  const { id } = useLocalSearchParams<{ id: string }>();
+  const db = getFirestore();
+
+  useEffect(() => {
+    console.log('Current user:', user); // Debugging log
+  }, [user]);
 
   useEffect(() => {
     const fetchSession = async () => {
+      if (!id) {
+        Alert.alert('Error', 'Invalid session ID.');
+        setLoading(false);
+        return;
+      }
+
       try {
-        const db = getFirestore();
-        const docRef = doc(db, "gameSessions", id);
+        const docRef = doc(db, 'gameSessions', id);
         const docSnap = await getDoc(docRef);
 
         if (docSnap.exists()) {
-          setSession({ id: docSnap.id, ...docSnap.data() } as GameSession);
+          const data = docSnap.data() as GameSession;
+          setSession({ id: docSnap.id, ...data });
+          setUpdatedDetails({
+            title: data.title || '',
+            location: data.location || '',
+            gameTime: data.gameTime
+              ? new Date(data.gameTime.seconds * 1000)
+              : new Date(),
+            boardgamegeekID: data.boardgamegeekID || '',
+            description: data.description || '',
+            image: data.image || '',
+          });
+
+          // Fetch creator and owner names
+          if (data.creator) {
+            const creatorDoc = await getDoc(doc(db, 'users', data.creator));
+            if (creatorDoc.exists()) {
+              setCreatorName(creatorDoc.data().name || 'Unknown');
+            }
+          }
+
+          if (data.owner) {
+            const ownerDoc = await getDoc(doc(db, 'users', data.owner));
+            if (ownerDoc.exists()) {
+              setOwnerName(ownerDoc.data().name || 'Unknown');
+            }
+          }
+
+          // Fetch participant details (names instead of IDs)
+          const participantIds = [
+            ...(data.hosts || []),
+            ...(data.players || []),
+            ...(data.teachers || []),
+          ];
+          const uniqueIds = Array.from(new Set(participantIds));
+          const fetchedParticipants = await Promise.all(
+            uniqueIds.map(async (uid) => {
+              const userDoc = await getDoc(doc(db, 'users', uid));
+              return userDoc.exists() ? { uid, name: userDoc.data().name || 'Unknown' } : null;
+            })
+          );
+          setParticipants(fetchedParticipants.filter(Boolean) as User[]);
+
+          // Fetch BGG game details if boardgamegeekID is set
+          if (data.boardgamegeekID) {
+            fetchBGGDetails(data.boardgamegeekID);
+          }
         } else {
-          console.error("No such document!");
+          Alert.alert('Error', 'Game session not found.');
         }
       } catch (error) {
-        console.error("Error fetching game session:", error);
+        console.error('Error fetching game session:', error);
+        Alert.alert('Error', 'Failed to fetch game session details.');
       } finally {
         setLoading(false);
       }
@@ -64,248 +151,149 @@ export default function GameSessionDetails() {
   }, [id]);
 
   useEffect(() => {
-    const fetchBGGDetails = async () => {
-      if (session?.boardgamegeekID) {
-        try {
-          const title = await fetchBGGTitle(session.boardgamegeekID);
-          const imageUrl = await fetchBGGImage(session.boardgamegeekID);
+    const fetchFriends = async () => {
+      if (!user) return;
 
-          console.log('Fetched title:', title);
-          console.log('Fetched image URL:', imageUrl);
-
-          const response = await fetch(`https://boardgamegeek.com/xmlapi2/thing?id=${session.boardgamegeekID}`);
-          const data = await response.text();
-          console.log('Raw BGG API response:', data); // Debugging log
-
-          const parser = new DOMParser();
-          const xmlDoc = parser.parseFromString(data, 'text/xml');
-
-          const yearPublished = xmlDoc.getElementsByTagName('yearpublished')[0]?.getAttribute('value');
-          const minPlayers = xmlDoc.getElementsByTagName('minplayers')[0]?.getAttribute('value');
-          const maxPlayers = xmlDoc.getElementsByTagName('maxplayers')[0]?.getAttribute('value');
-          const playingTime = xmlDoc.getElementsByTagName('playingtime')[0]?.getAttribute('value');
-          const weight = xmlDoc.getElementsByTagName('averageweight')[0]?.getAttribute('value');
-          const description = xmlDoc.getElementsByTagName('description')[0]?.textContent;
-
-          console.log('Parsed BGG details:', {
-            yearPublished,
-            minPlayers,
-            maxPlayers,
-            playingTime,
-            weight,
-            description,
-          }); // Debugging log
-
-          setBggDetails({
-            title,
-            image: imageUrl,
-            yearPublished,
-            minPlayers,
-            maxPlayers,
-            playingTime,
-            weight,
-            description,
-          });
-        } catch (error) {
-          console.error('Error fetching BGG details:', error);
-        }
+      try {
+        const friendsRef = collection(db, 'users', user.uid, 'friends');
+        const friendDocs = await getDocs(friendsRef);
+        const friends = friendDocs.docs.map((doc) => ({
+          uid: doc.id,
+          name: doc.data().name || 'Unknown',
+        }));
+        console.log('Fetched friends:', friends); // Debugging log
+        setFriendList(friends);
+        setFilteredFriends(friends); // Initialize filtered list
+      } catch (error) {
+        console.error('Error fetching friends:', error);
+        Alert.alert('Error', 'Failed to fetch friend list.');
       }
     };
 
-    fetchBGGDetails();
-  }, [session?.boardgamegeekID]);
+    fetchFriends();
+  }, [user]);
 
-  useEffect(() => {
-    const fetchPlayerNames = async () => {
-      if (!session?.players) return;
+  const fetchBGGDetails = async (bggID: string) => {
+    try {
+      const details = await fetchBGGGameDetails(bggID);
+      setBggDetails(details);
+    } catch (error) {
+      console.error('Error fetching BGG details:', error);
+    }
+  };
 
-      const db = getFirestore();
-      const playerNamesMap: { [key: string]: string } = {};
+  const toggleDescription = () => {
+    setShowFullDescription((prev) => !prev);
+  };
 
-      for (const uid of session.players) {
-        try {
-          const userDoc = await getDoc(doc(db, "users", uid));
-          if (userDoc.exists()) {
-            playerNamesMap[uid] = userDoc.data().name || "Unknown";
-          } else {
-            playerNamesMap[uid] = "Unknown";
-          }
-        } catch (error) {
-          console.error(`Error fetching user data for UID ${uid}:`, error);
-          playerNamesMap[uid] = "Unknown";
-        }
-      }
+  const handleSaveChanges = async () => {
+    if (!session) {
+      Alert.alert('Error', 'Session data is missing.');
+      return;
+    }
 
-      setPlayerNames(playerNamesMap);
-    };
+    try {
+      const docRef = doc(db, 'gameSessions', session.id);
 
-    fetchPlayerNames();
-  }, [session?.players]);
+      // Update Firestore
+      await updateDoc(docRef, {
+        title: updatedDetails.title || 'Unspecified game session',
+        location: updatedDetails.location || null,
+        gameTime: updatedDetails.gameTime || null,
+        boardgamegeekID: updatedDetails.boardgamegeekID || null,
+        description: updatedDetails.description || null,
+        image: updatedDetails.image || null,
+        hosts: session.hosts || [],
+        players: session.players || [],
+        teachers: session.teachers || [],
+      });
 
-  const toggleRole = async (uid: string, role: "hosts" | "teachers" | "players") => {
+      // Update local state
+      setSession((prev) => (prev ? { ...prev, ...updatedDetails } : prev));
+      setIsEditing(false);
+
+      Alert.alert('Success', 'Game session details updated successfully.');
+
+      // Navigate back to the previous screen
+      router.back();
+    } catch (error) {
+      console.error('Error updating game session:', error);
+      Alert.alert('Error', 'Failed to update game session details.');
+    }
+  };
+
+  const toggleRole = (uid: string, role: keyof GameSession) => {
     if (!session) return;
 
-    const isRemovingPlayerRole = role === "players" && session.players?.includes(uid);
+    setSession((prev) => {
+      if (!prev) return null;
 
-    // Check if the player is about to lose their last role
-    const isLastRole =
-      (session.hosts?.includes(uid) ? 1 : 0) +
-      (session.teachers?.includes(uid) ? 1 : 0) +
-      (session.players?.includes(uid) ? 1 : 0) === 1;
+      const updatedRoleList = prev[role]?.includes(uid)
+        ? prev[role]?.filter((id) => id !== uid)
+        : [...(prev[role] || []), uid];
 
-    if (isLastRole && session[role]?.includes(uid)) {
-      Alert.alert(
-        "Error",
-        "A player must have at least one role. Assign another role before removing this one."
-      );
+      return { ...prev, [role]: updatedRoleList };
+    });
+  };
+
+  const toggleOwner = (uid: string) => {
+    if (!session) return;
+
+    setSession((prev) => {
+      if (!prev) return null;
+
+      // Ensure only one participant can be the owner
+      return {
+        ...prev,
+        owner: prev.owner === uid ? null : uid, // Toggle owner role
+      };
+    });
+  };
+
+  const handleAddParticipant = async () => {
+    if (!newParticipant.trim()) {
+      Alert.alert('Error', 'Participant name or ID cannot be empty.');
       return;
     }
 
-    const updatedRoles = session[role]?.includes(uid)
-      ? session[role]?.filter((id) => id !== uid)
-      : [...(session[role] || []), uid];
-
-    try {
-      const db = getFirestore();
-      const docRef = doc(db, "gameSessions", session.id);
-
-      // If removing the "Player" role, ask if the user wants to remove the player from the session
-      if (isRemovingPlayerRole && !updatedRoles.includes(uid)) {
-        Alert.alert(
-          "Remove Player",
-          "Do you want to remove this player from the session?",
-          [
-            { text: "Cancel", style: "cancel" },
-            {
-              text: "Remove",
-              style: "destructive",
-              onPress: async () => {
-                await removePlayer(uid); // Call the removePlayer function
-              },
-            },
-          ]
-        );
-        return; // Exit early to avoid updating roles
-      }
-
-      await updateDoc(docRef, { [role]: updatedRoles });
-      setSession((prev) => (prev ? { ...prev, [role]: updatedRoles } : prev));
-    } catch (error) {
-      console.error("Error updating roles:", error);
-      Alert.alert("Error", "Could not update roles.");
-    }
+    // Simulate adding a new participant (in a real app, you'd fetch the user by ID or name)
+    const newUser: User = { uid: newParticipant, name: newParticipant };
+    setParticipants((prev) => [...prev, newUser]);
+    setNewParticipant('');
   };
 
-  const removePlayer = async (uid: string) => {
-    if (!session) {
-      Alert.alert('Error', 'Session not found');
-      return;
-    }
+  const handleRemoveParticipant = (uid: string) => {
+    setParticipants((prev) => prev.filter((participant) => participant.uid !== uid));
+    setSession((prev) => {
+      if (!prev) return null;
 
-    try {
-      const db = getFirestore();
-      const docRef = doc(db, "gameSessions", session.id);
-
-      // Use a transaction to ensure data consistency
-      await runTransaction(db, async (transaction) => {
-        const docSnap = await transaction.get(docRef);
-        if (!docSnap.exists()) {
-          throw new Error("Game session not found");
-        }
-
-        const data = docSnap.data();
-        const updatedPlayers = (data.players || []).filter(
-          (playerId: string) => playerId !== uid
-        );
-
-        // Also remove from roles
-        const updatedHosts = (data.hosts || []).filter(
-          (hostId: string) => hostId !== uid
-        );
-        const updatedTeachers = (data.teachers || []).filter(
-          (teacherId: string) => teacherId !== uid
-        );
-
-        // Update all roles at once
-        transaction.update(docRef, {
-          players: updatedPlayers,
-          hosts: updatedHosts,
-          teachers: updatedTeachers
-        });
-      });
-
-      // Update local state
-      setSession(prev => {
-        if (!prev) return null;
-        return {
-          ...prev,
-          players: prev.players?.filter(id => id !== uid) || [],
-          hosts: prev.hosts?.filter(id => id !== uid) || [],
-          teachers: prev.teachers?.filter(id => id !== uid) || []
-        };
-      });
-
-      Alert.alert('Success', 'Player removed from all roles');
-    } catch (error: any) {
-      console.error('Error removing player:', error);
-      Alert.alert(
-        'Error',
-        error.message || 'Could not remove player. Please try again.'
-      );
-    }
+      return {
+        ...prev,
+        hosts: prev.hosts?.filter((id) => id !== uid) || [],
+        players: prev.players?.filter((id) => id !== uid) || [],
+        teachers: prev.teachers?.filter((id) => id !== uid) || [],
+      };
+    });
   };
 
-  const inviteFriend = async (uid: string) => {
-    if (!session) {
-      console.error("Session is null. Cannot invite friend.");
-      return;
-    }
+  const handleSearchChange = (text: string) => {
+    setNewParticipant(text);
 
-    try {
-      const db = getFirestore();
-      const docRef = doc(db, "gameSessions", session.id);
+    // Filter friends list based on the search input
+    const filtered = friendList.filter((friend) =>
+      friend.name.toLowerCase().includes(text.toLowerCase())
+    );
 
-      await runTransaction(db, async (transaction) => {
-        const docSnap = await transaction.get(docRef);
-        if (!docSnap.exists()) {
-          throw new Error("Game session does not exist.");
-        }
+    console.log('Search input:', text); // Debugging log
+    console.log('Filtered friends:', filtered); // Debugging log
 
-        const data = docSnap.data();
-        const players = data.players || [];
-
-        if (players.includes(uid)) {
-          throw new Error("This friend is already a player.");
-        }
-
-        transaction.update(docRef, {
-          players: [...players, uid],
-        });
-      });
-
-      console.log("Firestore transaction completed successfully."); // Debugging log
-
-      // Update local state
-      setSession((prev) => {
-        const updatedSession = prev ? { ...prev, players: [...(prev.players || []), uid] } : prev;
-        console.log("Updated session state:", updatedSession); // Debugging log
-        return updatedSession;
-      });
-
-      Alert.alert("Success", "Friend invited.");
-    } catch (error: any) {
-      console.error("Error inviting friend:", error);
-      Alert.alert("Error", error.message || "Could not invite friend. Please try again.");
-    }
+    setFilteredFriends(filtered);
   };
-
-  const isCreatedByFriend = friends.includes(session?.creator || '');
-  const isNotAPlayer = !session?.players?.includes(user.uid || '');
 
   if (loading) {
     return (
       <View style={styles.container}>
-        <ActivityIndicator size="large" color="#007AFF" />
+        <Text>Loading...</Text>
       </View>
     );
   }
@@ -313,192 +301,433 @@ export default function GameSessionDetails() {
   if (!session) {
     return (
       <View style={styles.container}>
-        <Text style={styles.errorText}>Game session not found.</Text>
+        <Text>Game session not found.</Text>
       </View>
     );
   }
 
+  const isCreator = session.creator === user?.uid;
+
   return (
-    <ScrollView contentContainerStyle={styles.container}>
-      <View style={styles.header}>
-        <Text style={styles.headerTitle}>TableMatch</Text>
-      </View>
-      <Text style={styles.title}>{session.title || "Game Session Details"}</Text>
-      {bggDetails?.image && <Image source={{ uri: bggDetails.image }} style={styles.coverImage} />}
-      {session.location && <Text>Location: {session.location}</Text>}
-      {session.gameTime && (
-        <Text>
-          Time:{" "}
-          {session.gameTime.toDate
-            ? session.gameTime.toDate().toLocaleString()
-            : new Date(session.gameTime.seconds * 1000).toLocaleString()}
-        </Text>
-      )}
-      <Text>BGG ID: {session.boardgamegeekID}</Text>
-      <Text>Creator: {playerNames[session.creator || ""] || "Unknown"}</Text>
-      <Text>Owner: {playerNames[session.owner || ""] || "Unknown"}</Text>
-
-      {/* BGG Details */}
+    <ScrollView
+      contentContainerStyle={styles.container}
+      keyboardShouldPersistTaps="handled" // Ensures taps do not block scrolling
+      scrollEventThrottle={16} // Improves scroll performance by throttling events
+    >
       {bggDetails && (
-        <>
-          <Text style={styles.subtitle}>Game Details</Text>
-          {bggDetails.yearPublished && <Text>Year Published: {bggDetails.yearPublished}</Text>}
-          {bggDetails.minPlayers && bggDetails.maxPlayers && (
-            <Text>Players: {bggDetails.minPlayers} - {bggDetails.maxPlayers}</Text>
-          )}
-          {bggDetails.playingTime && <Text>Playing Time: {bggDetails.playingTime} minutes</Text>}
-          {bggDetails.weight && <Text>Weight: {bggDetails.weight}</Text>}
-          {bggDetails.description && <Text>Description: {bggDetails.description}</Text>}
-        </>
+        <View style={styles.bggSection}>
+          <Image source={{ uri: bggDetails.image }} resizeMode="contain" style={styles.bggImage} />
+          <Text style={styles.bggTitle}>{session.title || 'Game Details'}</Text>
+          <Text style={styles.bggStats}>
+            Players: {bggDetails.minPlayers} - {bggDetails.maxPlayers}
+          </Text>
+          <Text style={styles.bggDescription}>
+            {showFullDescription
+              ? bggDetails.description
+              : `${bggDetails.description.slice(0, 200)}...`}
+          </Text>
+          <TouchableOpacity onPress={toggleDescription}>
+            <Text style={styles.toggleDescription}>
+              {showFullDescription ? 'Show Less' : 'Read More'}
+            </Text>
+          </TouchableOpacity>
+        </View>
       )}
 
-      {/* Players and Roles */}
-      <Text style={styles.subtitle}>Players</Text>
-      <FlatList
-        data={session.players}
-        keyExtractor={(item) => item}
-        renderItem={({ item }) => (
-          <View style={styles.playerItem}>
-            <Text>{playerNames[item] || "Unknown"}</Text>
-            <View style={styles.roleButtons}>
-              <TouchableOpacity
-                style={[
-                  styles.roleButton,
-                  session.hosts?.includes(item) && styles.roleButtonActive,
-                ]}
-                onPress={() => toggleRole(item, "hosts")}
-              >
-                <Text
+      <Text style={styles.title}>{session.title || 'Unspecified Game Session'}</Text>
+
+      {session.image && (
+        <Image source={{ uri: session.image }} style={styles.image} />
+      )}
+
+      {isEditing ? (
+        <>
+          <Text style={styles.label}>Search BoardGameGeek</Text>
+          <BGGSearchInput onSelectGame={(game) => setUpdatedDetails((prev) => ({ ...prev, boardgamegeekID: game.id, title: game.name }))} />
+
+          <Text style={styles.label}>Title</Text>
+          <TextInput
+            style={styles.input}
+            placeholder="Title"
+            value={updatedDetails.title}
+            onChangeText={(text) => setUpdatedDetails((prev) => ({ ...prev, title: text }))}
+          />
+
+          <Text style={styles.label}>Location</Text>
+          <TextInput
+            style={styles.input}
+            placeholder="Location"
+            value={updatedDetails.location}
+            onChangeText={(text) => setUpdatedDetails((prev) => ({ ...prev, location: text }))}
+          />
+
+          <Text style={styles.label}>Game Time</Text>
+          <GameTimePicker
+            gameTime={updatedDetails.gameTime}
+            onChangeGameTime={(event, selectedDate) => {
+              if (selectedDate) {
+                setUpdatedDetails((prev) => ({ ...prev, gameTime: selectedDate }));
+              }
+            }}
+            showDatePicker={showDatePicker}
+            setShowDatePicker={setShowDatePicker}
+          />
+
+          <Text style={styles.label}>Description</Text>
+          <TextInput
+            style={styles.input}
+            placeholder="Description"
+            value={updatedDetails.description}
+            onChangeText={(text) => setUpdatedDetails((prev) => ({ ...prev, description: text }))}
+          />
+
+          <View style={styles.section}>
+            <Text style={styles.sectionTitle}>Participants</Text>
+            {participants.map((participant) => (
+              <View key={participant.uid} style={styles.participantRow}>
+                <Text style={styles.participantName}>{participant.name}</Text>
+                <TouchableOpacity
                   style={[
-                    styles.roleButtonText,
-                    session.hosts?.includes(item) && styles.roleButtonTextActive,
+                    styles.roleButton,
+                    session.hosts?.includes(participant.uid) && styles.roleButtonActive,
                   ]}
+                  onPress={() => toggleRole(participant.uid, 'hosts')}
                 >
-                  Host
-                </Text>
-              </TouchableOpacity>
-              <TouchableOpacity
-                style={[
-                  styles.roleButton,
-                  session.teachers?.includes(item) && styles.roleButtonActive,
-                ]}
-                onPress={() => toggleRole(item, "teachers")}
-              >
-                <Text
+                  <Text>Host</Text>
+                </TouchableOpacity>
+                <TouchableOpacity
                   style={[
-                    styles.roleButtonText,
-                    session.teachers?.includes(item) && styles.roleButtonTextActive,
+                    styles.roleButton,
+                    session.players?.includes(participant.uid) && styles.roleButtonActive,
                   ]}
+                  onPress={() => toggleRole(participant.uid, 'players')}
                 >
-                  Teacher
-                </Text>
-              </TouchableOpacity>
-              <TouchableOpacity
-                style={[
-                  styles.roleButton,
-                  session.players?.includes(item) && styles.roleButtonActive,
-                ]}
-                onPress={() => toggleRole(item, "players")}
-              >
-                <Text
+                  <Text>Player</Text>
+                </TouchableOpacity>
+                <TouchableOpacity
                   style={[
-                    styles.roleButtonText,
-                    session.players?.includes(item) && styles.roleButtonTextActive,
+                    styles.roleButton,
+                    session.teachers?.includes(participant.uid) && styles.roleButtonActive,
                   ]}
+                  onPress={() => toggleRole(participant.uid, 'teachers')}
                 >
-                  Player
-                </Text>
-              </TouchableOpacity>
-              {session.creator === user.uid && (
+                  <Text>Teacher</Text>
+                </TouchableOpacity>
+                <TouchableOpacity
+                  style={[
+                    styles.roleButton,
+                    session.owner === participant.uid && styles.roleButtonActive,
+                  ]}
+                  onPress={() => toggleOwner(participant.uid)}
+                >
+                  <Text>Owner</Text>
+                </TouchableOpacity>
                 <TouchableOpacity
                   style={styles.removeButton}
-                  onPress={() => removePlayer(item)}
+                  onPress={() => handleRemoveParticipant(participant.uid)}
                 >
-                  <Text style={styles.removeButtonText}>Remove</Text>
+                  <Text>Remove</Text>
                 </TouchableOpacity>
+              </View>
+            ))}
+            <View style={styles.section}>
+              <Text style={styles.sectionTitle}>Add Participant</Text>
+              <TextInput
+                style={styles.input}
+                placeholder="Search friends by name"
+                value={newParticipant}
+                onChangeText={(text) => {
+                  console.log('Search input:', text); // Debugging log
+                  handleSearchChange(text);
+                }}
+              />
+              {filteredFriends.length > 0 && (
+                <>
+                  {console.log('Rendering suggestions:', filteredFriends)} {/* Debugging log */}
+                  <FlatList
+                    data={filteredFriends}
+                    keyExtractor={(item) => item.uid}
+                    renderItem={({ item }) => (
+                      <TouchableOpacity
+                        style={styles.suggestionItem}
+                        onPress={() => {
+                          setNewParticipant(item.name); // Set the selected friend's name
+                          setFilteredFriends([]); // Clear suggestions
+                        }}
+                      >
+                        <Text style={styles.suggestionText}>{item.name}</Text>
+                      </TouchableOpacity>
+                    )}
+                  />
+                </>
               )}
+              <TouchableOpacity style={styles.addButton} onPress={handleAddParticipant}>
+                <Text style={styles.buttonText}>Add Participant</Text>
+              </TouchableOpacity>
             </View>
           </View>
-        )}
-      />
 
-      {/* Invite Friends */}
-      <Text style={styles.subtitle}>Invite Friends</Text>
-      <FlatList
-        data={friends.filter((friendUid) => !session.players?.includes(friendUid))}
-        keyExtractor={(item) => item}
-        renderItem={({ item }) => (
-          <View style={styles.friendItem}>
-            <Text>{playerNames[item] || "Unknown"}</Text>
-            <TouchableOpacity
-              style={styles.inviteButton}
-              onPress={() => inviteFriend(item)}
-            >
-              <Text style={styles.inviteButtonText}>Invite</Text>
-            </TouchableOpacity>
+          <TouchableOpacity style={[styles.saveButton, styles.button]} onPress={handleSaveChanges}>
+            <Text style={styles.buttonText}>Save Changes</Text>
+          </TouchableOpacity>
+          <TouchableOpacity style={[styles.cancelButton, styles.button]} onPress={() => setIsEditing(false)}>
+            <Text style={styles.buttonText}>Cancel</Text>
+          </TouchableOpacity>
+        </>
+      ) : (
+        <>
+          <View style={styles.section}>
+            <Text style={styles.sectionTitle}>Game Details</Text>
+            <Text style={styles.detailLabel}>Title:</Text>
+            <Text style={styles.detailValue}>{session.title || 'Not specified'}</Text>
+
+            <Text style={styles.detailLabel}>Location:</Text>
+            <Text style={styles.detailValue}>{session.location || 'Not specified'}</Text>
+
+            <Text style={styles.detailLabel}>Game Time:</Text>
+            <Text style={styles.detailValue}>
+              {session.gameTime ? new Date(session.gameTime.seconds * 1000).toLocaleString() : 'Not specified'}
+            </Text>
+
+            <Text style={styles.detailLabel}>Description:</Text>
+            <Text style={styles.detailValue}>{session.description || 'No description available'}</Text>
+
+            <Text style={styles.detailLabel}>Creator:</Text>
+            <Text style={styles.detailValue}>{creatorName}</Text>
+
+            <Text style={styles.detailLabel}>Owner:</Text>
+            <Text style={styles.detailValue}>{ownerName}</Text>
           </View>
-        )}
-      />
+
+          <View style={styles.section}>
+            <Text style={styles.sectionTitle}>Participants</Text>
+            {participants.map((participant) => (
+              <View key={participant.uid} style={styles.participantRow}>
+                <Text style={styles.participantName}>{participant.name}</Text>
+                <TouchableOpacity
+                  style={[
+                    styles.roleButton,
+                    session.hosts?.includes(participant.uid) && styles.roleButtonActive,
+                  ]}
+                  onPress={() => toggleRole(participant.uid, 'hosts')}
+                >
+                  <Text>Host</Text>
+                </TouchableOpacity>
+                <TouchableOpacity
+                  style={[
+                    styles.roleButton,
+                    session.players?.includes(participant.uid) && styles.roleButtonActive,
+                  ]}
+                  onPress={() => toggleRole(participant.uid, 'players')}
+                >
+                  <Text>Player</Text>
+                </TouchableOpacity>
+                <TouchableOpacity
+                  style={[
+                    styles.roleButton,
+                    session.teachers?.includes(participant.uid) && styles.roleButtonActive,
+                  ]}
+                  onPress={() => toggleRole(participant.uid, 'teachers')}
+                >
+                  <Text>Teacher</Text>
+                </TouchableOpacity>
+                <TouchableOpacity
+                  style={[
+                    styles.roleButton,
+                    session.owner === participant.uid && styles.roleButtonActive,
+                  ]}
+                  onPress={() => toggleOwner(participant.uid)}
+                >
+                  <Text>Owner</Text>
+                </TouchableOpacity>
+                <TouchableOpacity
+                  style={styles.removeButton}
+                  onPress={() => handleRemoveParticipant(participant.uid)}
+                >
+                  <Text>Remove</Text>
+                </TouchableOpacity>
+              </View>
+            ))}
+            <View style={styles.section}>
+              <Text style={styles.sectionTitle}>Add Participant</Text>
+              <TextInput
+                style={styles.input}
+                placeholder="Search friends by name"
+                value={newParticipant}
+                onChangeText={(text) => {
+                  console.log('Search input:', text); // Debugging log
+                  handleSearchChange(text);
+                }}
+              />
+              {filteredFriends.length > 0 && (
+                <>
+                  {console.log('Rendering suggestions:', filteredFriends)} {/* Debugging log */}
+                  <FlatList
+                    data={filteredFriends}
+                    keyExtractor={(item) => item.uid}
+                    renderItem={({ item }) => (
+                      <TouchableOpacity
+                        style={styles.suggestionItem}
+                        onPress={() => {
+                          setNewParticipant(item.name); // Set the selected friend's name
+                          setFilteredFriends([]); // Clear suggestions
+                        }}
+                      >
+                        <Text style={styles.suggestionText}>{item.name}</Text>
+                      </TouchableOpacity>
+                    )}
+                  />
+                </>
+              )}
+              <TouchableOpacity style={styles.addButton} onPress={handleAddParticipant}>
+                <Text style={styles.buttonText}>Add Participant</Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        </>
+      )}
     </ScrollView>
   );
 }
 
 const styles = StyleSheet.create({
-  container: { padding: 20, backgroundColor: '#FFFFFF' },
-  header: {
-    backgroundColor: '#4A148C',
-    paddingVertical: 20,
+  container: {
+    padding: 20,
+    backgroundColor: '#FFFFFF',
+  },
+  bggSection: {
+    marginBottom: 20,
+    padding: 15,
+    borderRadius: 10,
+    backgroundColor: '#F3F4F6',
     alignItems: 'center',
   },
-  headerTitle: {
+  bggImage: {
+    width: 200,
+    height: 200,
+    resizeMode: 'contain',
+    marginBottom: 10,
+  },
+  bggTitle: {
+    fontSize: 20,
+    fontWeight: 'bold',
+    marginBottom: 10,
+    textAlign: 'center',
+    color: '#4A148C',
+  },
+  bggStats: {
+    fontSize: 16,
+    marginBottom: 10,
+    color: '#333333',
+  },
+  bggDescription: {
+    fontSize: 14,
+    color: '#333333',
+    textAlign: 'justify',
+  },
+  toggleDescription: {
+    fontSize: 14,
+    color: '#2196F3',
+    marginTop: 5,
+  },
+  title: {
     fontSize: 24,
     fontWeight: 'bold',
-    color: '#FFFFFF',
+    marginBottom: 20,
+    textAlign: 'center',
+    color: '#4A148C',
   },
-  title: { fontSize: 24, marginBottom: 20, textAlign: 'center', color: '#4A148C' },
-  subtitle: { fontSize: 20, fontWeight: "bold", marginTop: 20, marginBottom: 10 },
-  errorText: { fontSize: 18, color: "red" },
-  playerItem: { flexDirection: "row", justifyContent: "space-between", marginBottom: 10 },
-  roleButtons: { flexDirection: "row" },
+  image: {
+    width: '100%',
+    height: 200,
+    resizeMode: 'contain',
+    marginBottom: 20,
+  },
+  section: {
+    marginBottom: 20,
+    padding: 15,
+    borderRadius: 10,
+    backgroundColor: '#F3F4F6',
+  },
+  sectionTitle: {
+    fontSize: 18,
+    fontWeight: 'bold',
+    marginBottom: 10,
+    color: '#4A148C',
+  },
+  detailLabel: {
+    fontSize: 16,
+    fontWeight: 'bold',
+    color: '#4A148C',
+  },
+  detailValue: {
+    fontSize: 16,
+    marginBottom: 10,
+    color: '#333333',
+  },
+  participantRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginBottom: 10,
+  },
+  participantName: {
+    flex: 1,
+    fontSize: 16,
+  },
   roleButton: {
     padding: 5,
     borderWidth: 1,
-    borderColor: "#007AFF", // Blue border for deselected state
+    borderColor: '#ccc',
     borderRadius: 5,
-    marginRight: 5,
-    backgroundColor: "#FFFFFF", // White background for deselected state
+    marginHorizontal: 5,
   },
   roleButtonActive: {
-    backgroundColor: "#007AFF", // Blue background for selected state
-    borderColor: "#005BB5", // Slightly darker blue border for selected state
+    backgroundColor: '#d0f0c0', // Highlight active roles
   },
-  roleButtonText: {
-    color: "#007AFF", // Blue text for deselected state
-  },
-  roleButtonTextActive: {
-    color: "#FFFFFF", // White text for selected state
-  },
-  coverImage: { width: "100%", height: 200, resizeMode: "cover", marginBottom: 10 },
   removeButton: {
     padding: 5,
-    borderWidth: 1,
-    borderColor: "red",
-    borderRadius: 5,
-    marginLeft: 5,
-  },
-  removeButtonText: { color: "red" },
-  inviteButton: {
-    padding: 5,
-    borderWidth: 1,
-    borderColor: "#4CAF50",
+    backgroundColor: '#E65100',
     borderRadius: 5,
   },
-  inviteButtonText: {
-    color: "#4CAF50",
+  input: {
+    borderWidth: 1,
+    borderColor: '#ccc',
+    padding: 10,
+    borderRadius: 5,
+    marginBottom: 15,
   },
-  friendItem: {
-    flexDirection: "row",
-    justifyContent: "space-between",
+  button: {
+    padding: 10,
+    borderRadius: 5,
+    alignItems: 'center',
     marginBottom: 10,
+  },
+  saveButton: {
+    backgroundColor: '#4CAF50',
+  },
+  cancelButton: {
+    backgroundColor: '#E65100',
+  },
+  editButton: {
+    backgroundColor: '#2196F3',
+  },
+  addButton: {
+    backgroundColor: '#4CAF50',
+    padding: 10,
+    borderRadius: 5,
+    alignItems: 'center',
+  },
+  buttonText: {
+    color: '#fff',
+    fontWeight: 'bold',
+  },
+  suggestionItem: {
+    padding: 10,
+    borderBottomWidth: 1,
+    borderBottomColor: '#ccc',
+  },
+  suggestionText: {
+    fontSize: 16,
+    color: '#333',
   },
 });

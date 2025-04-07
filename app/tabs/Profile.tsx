@@ -174,18 +174,27 @@ export default function Profile() {
           onPress: async () => {
             try {
               const userRef = doc(db, 'users', user.uid);
+
+              // Use a transaction to ensure data consistency
               await runTransaction(db, async (transaction) => {
                 const userDoc = await transaction.get(userRef);
                 if (!userDoc.exists()) {
                   throw new Error('Your user profile was not found.');
                 }
+
+                // Get the current friends list
                 const currentFriends: string[] = userDoc.data().friends || [];
                 if (!currentFriends.includes(friendUid)) {
                   throw new Error('This friend is not in your friend list.');
                 }
+
+                // Remove the friend from the list
                 const updatedFriends = currentFriends.filter((uid) => uid !== friendUid);
+
+                // Update Firestore
                 transaction.update(userRef, { friends: updatedFriends });
               });
+
               // Update local state after successful Firestore update
               setFriends((prev) => prev.filter((friend) => friend.uid !== friendUid));
               setUserData((prev) =>
@@ -193,6 +202,7 @@ export default function Profile() {
                   ? { ...prev, friends: prev.friends?.filter((uid) => uid !== friendUid) || [] }
                   : null
               );
+
               Alert.alert('Success', 'Friend removed successfully');
             } catch (error: any) {
               console.error('Error removing friend:', error);
